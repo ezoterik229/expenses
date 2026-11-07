@@ -39,7 +39,9 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--hint
 .row .mid{flex:1;min-width:0}
 .row .cat{font-size:15px}
 .row .note{color:var(--hint);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row .amt{font-weight:600;white-space:nowrap}
+.row .amt{font-weight:600;white-space:nowrap;text-align:right}
+.conv{color:var(--hint);font-size:12px;font-weight:400}
+.rate{color:var(--hint);font-size:12px;text-align:center;margin:18px 0 0}
 .empty{color:var(--hint);text-align:center;padding:40px 0}
 .dock{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 16px calc(10px + env(safe-area-inset-bottom))}
 .dock .in{max-width:560px;margin:0 auto}
@@ -61,9 +63,9 @@ dialog .note{color:var(--hint);font-size:14px;margin-bottom:12px}
     <h1>Расходы</h1>
     <div class="nav"><button id="prev" aria-label="Предыдущий месяц">‹</button><span class="month" id="month"></span><button id="next" aria-label="Следующий месяц">›</button></div>
   </header>
-  <div class="chips" id="curChips"></div>
   <div class="total"><div class="big" id="sum">0</div><div class="sub" id="cnt"></div><div class="bars" id="bars"></div></div>
   <div id="list"></div>
+  <div class="rate" id="rate"></div>
 </div>
 
 <div class="dock"><div class="in">
@@ -112,6 +114,33 @@ function detectCategory(text) {
 const CUR_SYM = { USD: "$", EUR: "€", RUB: "₽" };
 let defaultCur = "USD";
 
+/* ---------- Курсы валют (единиц за 1 USD) ---------- */
+let rates = { USD: 1, EUR: 0.9, RUB: 80 };
+let ratesInfo = "курс приблизительный";
+const CUR_LIST = ["USD", "EUR", "RUB"];
+const conv = (a, from, to) => a / rates[from] * rates[to];
+function loadCachedRates() {
+  try {
+    const c = JSON.parse(localStorage.getItem("exp_rates") || "null");
+    if (c && c.r && c.r.EUR && c.r.RUB) { rates = { USD: 1, EUR: c.r.EUR, RUB: c.r.RUB }; ratesInfo = "курс на " + c.d + " (из кэша)"; return c.t; }
+  } catch (e) {}
+  return 0;
+}
+async function refreshRates() {
+  const t = loadCachedRates();
+  if (t && Date.now() - t < 6 * 3600e3) { ratesInfo = ratesInfo.replace(" (из кэша)", ""); return; }
+  try {
+    const res = await fetch("https://open.er-api.com/v6/latest/USD");
+    const j = await res.json();
+    if (j.result === "success" && j.rates.EUR && j.rates.RUB) {
+      rates = { USD: 1, EUR: j.rates.EUR, RUB: j.rates.RUB };
+      const d = new Date(), ds = pad(d.getDate()) + "." + pad(d.getMonth() + 1);
+      ratesInfo = "курс на " + ds;
+      try { localStorage.setItem("exp_rates", JSON.stringify({ t: Date.now(), d: ds, r: rates })); } catch (e) {}
+    }
+  } catch (e) {}
+}
+
 function parse(text) {
   const t = text.trim();
   const m = t.match(/(\d+(?:[  ]\d{3})*(?:[.,]\d{1,2})?|\d+)/);
@@ -123,8 +152,8 @@ function parse(text) {
   else if (/€|eur|евро/i.test(t)) cur = "EUR";
   else if (/₽|rub|руб|(^|\s)р(\.|\s|$)/i.test(t)) cur = "RUB";
   let note = t.replace(m[0], " ")
-    .replace(/\$|€|₽|usd|eur|rub|доллар\w*|бакс\w*|евро|руб\w*/ig, " ")
-    .replace(/(^|\s)(потратил\w*|купил\w*|заплатил\w*|отдал\w*|на|за|вчера|р\.?)(?=\s|$)/ig, " ")
+    .replace(/\$|€|₽|usd|eur|rub|доллар[а-яё]*|бакс[а-яё]*|евро|руб[а-яё]*/ig, " ")
+    .replace(/(^|\s)(потратил[а-яё]*|купил[а-яё]*|заплатил[а-яё]*|отдал[а-яё]*|на|за|вчера|р\.?)(?=\s|$)/ig, " ")
     .replace(/\s+/g, " ").trim();
   if (!note) note = t;
   const date = /вчера/i.test(t) ? addDays(today(), -1) : today();
@@ -200,6 +229,9 @@ const fmt = (n, c) => {
   return c === "RUB" ? s + " ₽" : (CUR_SYM[c] || "") + s;
 };
 
+const usd = e => e.u != null ? e.u : conv(e.a, e.c, "USD");
+const fmtOthers = (a, c) => CUR_LIST.filter(x => x !== c).map(x => fmt(conv(a, c, x), x)).join(" · ");
+
 function monthEntries() {
   const out = [];
   Object.keys(days).filter(d => d.startsWith(ym)).sort().reverse().forEach(d => days[d].forEach(e => out.push({ d, e })));
@@ -210,35 +242,30 @@ function render() {
   const [y, m] = ym.split("-").map(Number);
   $("month").textContent = MONTHS[m - 1] + " " + y;
   const items = monthEntries();
-  const curs = [...new Set(items.map(x => x.e.c))];
-  if (!curs.length) curs.push(defaultCur);
-  if (!curFilter || !curs.includes(curFilter)) curFilter = curs.includes(defaultCur) ? defaultCur : curs[0];
-
-  $("curChips").innerHTML = curs.length > 1
-    ? curs.map(c => '<button class="chip' + (c === curFilter ? " on" : "") + '" data-c="' + c + '">' + c + "</button>").join("") : "";
-
-  const shown = items.filter(x => x.e.c === curFilter);
-  const total = shown.reduce((s, x) => s + x.e.a, 0);
-  $("sum").textContent = fmt(total, curFilter);
-  $("cnt").textContent = shown.length ? shown.length + " " + plural(shown.length) : "Трат пока нет";
+  const shown = items;
+  const total = shown.reduce((s, x) => s + usd(x.e), 0);
+  $("sum").textContent = fmt(total, "USD");
+  $("cnt").textContent = shown.length ? shown.length + " " + plural(shown.length) + " · ≈ " + fmtOthers(total, "USD") : "Трат пока нет";
+  $("rate").textContent = ratesInfo + " · итоги в $ по курсу на момент траты";
 
   const byCat = {};
-  shown.forEach(x => { byCat[x.e.g] = (byCat[x.e.g] || 0) + x.e.a; });
+  shown.forEach(x => { byCat[x.e.g] = (byCat[x.e.g] || 0) + usd(x.e); });
   const rows = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
   $("bars").innerHTML = rows.map(([g, v]) =>
-    '<div class="bar"><div class="top"><span>' + (CAT_ICON[g] || "📦") + " " + esc(g) + "</span><span>" + fmt(v, curFilter) +
+    '<div class="bar"><div class="top"><span>' + (CAT_ICON[g] || "📦") + " " + esc(g) + "</span><span>" + fmt(v, "USD") +
     ' · ' + Math.round(v / total * 100) + '%</span></div><div class="track"><div class="fill" style="width:' + (v / rows[0][1] * 100) + '%"></div></div></div>').join("");
 
   if (!items.length) { $("list").innerHTML = '<div class="empty">Напишите внизу, например:<br><b>2$ на игры</b></div>'; return; }
   let html = "", last = "";
   items.forEach(({ d, e }) => {
     if (d !== last) {
-      const dayTotal = days[d].filter(x => x.c === curFilter).reduce((s, x) => s + x.a, 0);
-      html += "<h2><span>" + dayLabel(d) + "</span><span>" + (dayTotal ? fmt(dayTotal, curFilter) : "") + "</span></h2>";
+      const dayTotal = days[d].reduce((s, x) => s + usd(x), 0);
+      html += "<h2><span>" + dayLabel(d) + "</span><span>" + (dayTotal ? fmt(dayTotal, "USD") : "") + "</span></h2>";
       last = d;
     }
     html += '<div class="row" data-d="' + d + '" data-i="' + e.i + '"><div class="ico">' + (CAT_ICON[e.g] || "📦") + '</div><div class="mid"><div class="cat">' +
-      esc(e.g) + '</div><div class="note">' + esc(e.n) + '</div></div><div class="amt">' + fmt(e.a, e.c) + "</div></div>";
+      esc(e.g) + '</div><div class="note">' + esc(e.n) + '</div></div><div class="amt">' + fmt(e.a, e.c) +
+      (e.c !== "USD" ? '<div class="conv">≈ ' + fmt(usd(e), "USD") + "</div>" : "") + "</div></div>";
   });
   $("list").innerHTML = html;
 }
@@ -250,19 +277,19 @@ function haptic(t) { try { tg && tg.HapticFeedback && tg.HapticFeedback.notifica
 
 $("inp").addEventListener("input", () => {
   const p = parse($("inp").value);
-  $("preview").textContent = p ? "→ " + fmt(p.a, p.c) + " · " + (CAT_ICON[p.g] || "") + " " + p.g : "";
+  $("preview").textContent = p ? "→ " + fmt(p.a, p.c) + " (≈ " + fmtOthers(p.a, p.c) + ") · " + (CAT_ICON[p.g] || "") + " " + p.g : "";
 });
 
 $("form").addEventListener("submit", async ev => {
   ev.preventDefault();
   const p = parse($("inp").value);
   if (!p) { haptic("error"); $("preview").textContent = "Не вижу сумму. Пример: 2$ на игры"; return; }
-  const entry = { i: Date.now().toString(36), a: p.a, c: p.c, g: p.g, n: p.n };
+  const entry = { i: Date.now().toString(36), a: p.a, c: p.c, g: p.g, n: p.n, u: +conv(p.a, p.c, "USD").toFixed(4) };
   const d = p.d;
   if (!days[d]) { const got = await store.getItems([dk(d)]); days[d] = parseDay(got[dk(d)]); }
   days[d].push(entry);
   await saveDay(d);
-  ym = d.slice(0, 7); curFilter = p.c;
+  ym = d.slice(0, 7);
   await loadMonth();
   $("inp").value = ""; $("preview").textContent = "";
   haptic("success"); render();
@@ -276,7 +303,6 @@ async function shiftMonth(n) {
   ym = d.getFullYear() + "-" + pad(d.getMonth() + 1);
   await loadMonth(); render();
 }
-$("curChips").addEventListener("click", e => { const c = e.target.dataset.c; if (c) { curFilter = c; render(); } });
 
 let cur = null;
 $("list").addEventListener("click", e => {
@@ -285,7 +311,7 @@ $("list").addEventListener("click", e => {
   const entry = (days[d] || []).find(x => x.i === i); if (!entry) return;
   cur = { d, entry };
   $("dAmt").textContent = fmt(entry.a, entry.c);
-  $("dNote").textContent = entry.n;
+  $("dNote").textContent = entry.n + " · ≈ " + fmtOthers(entry.a, entry.c);
   $("dCats").innerHTML = CATS.map(c => '<button class="chip' + (c[0] === entry.g ? " on" : "") + '" data-g="' + esc(c[0]) + '">' + c[1] + " " + esc(c[0]) + "</button>").join("");
   $("dlg").showModal();
 });
@@ -306,6 +332,7 @@ $("dClose").onclick = () => $("dlg").close();
   allKeys = new Set(keys);
   const got = await store.getItems(["cfg"]);
   try { const c = JSON.parse(got.cfg || "{}"); if (c.cur) defaultCur = c.cur; } catch (e) {}
+  await refreshRates();
   await loadMonth();
   render();
 })();
